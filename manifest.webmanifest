@@ -1,0 +1,21 @@
+{
+  "id": "./",
+  "name": "テストクリーナー",
+  "short_name": "テストクリーナー",
+  "description": "書き込みのある学習プリントを、端末内だけで再印刷しやすく整えます。",
+  "lang": "ja",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#ffffff",
+  "theme_color": "#205c43",
+  "icons": [
+    {
+      "src": "./icon.png",
+      "sizes": "1254x1254",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

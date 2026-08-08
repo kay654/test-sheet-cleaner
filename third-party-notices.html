@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>第三者ライセンス</title>
+    <style>
+      body { color: #17221d; background: #f5f7f4; font-family: system-ui, sans-serif; line-height: 1.7; margin: 0; }
+      main { background: #fffefb; box-shadow: 0 14px 44px #182b2114; width: min(820px, calc(100% - 32px)); margin: 32px auto; padding: clamp(24px, 5vw, 44px); }
+      h1 { margin-top: 0; font-family: serif; } a { color: #205c43; } code { overflow-wrap: anywhere; } table { border-collapse: collapse; width: 100%; } th, td { border: 1px solid #dfe5df; padding: .65rem; text-align: left; vertical-align: top; } .detail { color: #657169; font-size: .9rem; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p><a href="./index.html">テストクリーナーへ戻る</a></p>
+      <h1>第三者ライセンス</h1>
+      <p>HEIC/HEIF の読み込みと画像処理に、以下の第三者コンポーネントを使用しています。</p>
+      <table>
+        <thead><tr><th>コンポーネント</th><th>ライセンス</th><th>配布物・対応ソース</th></tr></thead>
+        <tbody>
+          <tr><td>OpenCV 5.0.0 / OpenCV.js</td><td><a href="./third_party_licenses/Apache-2.0.txt">Apache-2.0</a></td><td><code>vendor/opencv/</code>（変更なし）</td></tr>
+          <tr><td>heic2any 0.0.4 / gifshot</td><td><a href="./third_party_licenses/MIT.txt">MIT</a></td><td><code>vendor/heic2any/heic2any.min.js</code></td></tr>
+          <tr><td>libheif 系デコーダー（heic2any に内包）</td><td><a href="./third_party_licenses/LGPL-3.0.txt">LGPL-3.0-or-later</a> / <a href="./third_party_licenses/GPL-3.0.txt">GPL-3.0</a></td><td><a href="./third_party_source/heic2any-0.0.4/README-COMPLIANCE.md">対応ソースと再構築方法</a></td></tr>
+        </tbody>
+      </table>
+      <p class="detail">HEIC 変換ファイルの対応ソースは、heic2any 上流のタグ 0.0.4（コミット <code>3428539e643e112323a5b8a2c77c6402cb1372f6</code>）から取得しています。</p>
+    </main>
+  </body>
+</html>

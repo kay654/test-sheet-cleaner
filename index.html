@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f5f7f4">
+    <meta name="description" content="書き込みのある学習プリントを、端末内だけで再印刷しやすく整えます。">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="テストクリーナー">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta property="og:title" content="テストクリーナー">
+    <meta property="og:description" content="書き込みを消して、もう一度解けるプリントへ。">
+    <meta property="og:image" content="./og.png">
+    <title>テストクリーナー</title>
+    <link rel="manifest" href="./manifest.webmanifest?v=1">
+    <link rel="icon" href="./icon.png" type="image/png">
+    <link rel="apple-touch-icon" href="./icon.png">
+    <link rel="stylesheet" href="./styles.css?v=1">
+    <style>
+      .brand-mark { object-fit: cover; width: 38px; height: 38px; border-radius: 10px; box-shadow: 2px 2px 5px #183e2b33; }
+      .zoom-range { align-items: center; gap: 7px; display: inline-flex; }
+      .zoom-range span, .zoom-range output { color: var(--muted); font-size: 10px; font-weight: 800; }
+      .zoom-range input { width: clamp(150px, 20vw, 280px); accent-color: var(--green); }
+      .zoom-fit { white-space: nowrap; padding-inline: 7px; font-size: 9px; }
+      .zoom-fit.active { color: var(--green-dark); background: var(--green-light); border-color: var(--green); }
+      @media (width <= 600px) { .brand-mark { width: 36px; height: 36px; } }
+      .site-footer { color: #7b877f; padding: 16px 0 22px; text-align: center; font-size: 10px; }
+      .site-footer a { color: inherit; text-decoration: none; }
+      .site-footer a:hover, .site-footer a:focus-visible { color: #52635a; text-decoration: underline; text-underline-offset: 3px; }
+      @media print {
+        html, body { width: auto !important; height: auto !important; min-width: 0 !important; min-height: 0 !important; margin: 0 !important; overflow: visible !important; background: #fff !important; }
+        .app-shell { display: none !important; }
+        .print-sheet { display: block !important; width: 210mm !important; height: auto !important; min-height: 0 !important; margin: 0 !important; padding: 0 !important; overflow: hidden !important; background: #fff !important; break-inside: avoid; page-break-inside: avoid; }
+        .print-sheet canvas { display: block !important; width: var(--print-width, 200mm) !important; max-width: none !important; height: var(--print-height, 270mm) !important; max-height: none !important; margin: 0 auto !important; border: 0 !important; box-shadow: none !important; }
+      }
+    </style>
+    <script src="./app.js?v=1" defer></script>
+  </head>
+  <body>
+    <main id="app-shell" class="app-shell">
+      <header class="app-header">
+        <button id="brand-button" class="brand" type="button" aria-label="最初に戻る">
+          <img class="brand-mark" src="./icon.png" alt="">
+          <span><strong>テストクリーナー</strong></span>
+        </button>
+        <div class="header-actions">
+          <span class="privacy-pill"><span aria-hidden="true">●</span> 端末内処理</span>
+        </div>
+      </header>
+
+      <section id="welcome" class="welcome">
+        <div class="welcome-copy">
+          <h1>テスト用紙を復元</h1>
+          <p id="welcome-lead" class="lead">画像を選ぶと自動で書き込みを取り除きます</p>
+        </div>
+
+        <div id="welcome-error" class="error-banner welcome-error" role="alert" hidden>
+          <strong>画像を処理できませんでした</strong>
+          <span data-error-message></span>
+          <button class="choose-another" type="button">別の画像を選ぶ</button>
+        </div>
+
+        <section id="drop-zone" class="drop-zone" aria-label="画像のドラッグ＆ドロップ領域">
+          <div class="paper-stack" aria-hidden="true">
+            <span></span><span></span><span class="paper-face">＋</span>
+          </div>
+          <h2 id="drop-title">画像を選択</h2>
+          <p id="drop-description">ここにドロップすることもできます</p>
+          <label id="choose-image" class="primary-button image-picker-button" for="image-input" role="button" tabindex="0">画像を選ぶ</label>
+          <button id="load-sample" class="sample-button" type="button">サンプルで試す</button>
+          <small>JPEG・PNG・WebP・HEIC ほか</small>
+        </section>
+        <footer class="site-footer"><a href="./third-party-notices.html">第三者ライセンス</a></footer>
+      </section>
+
+      <section id="workspace" class="workspace" hidden>
+        <div class="workspace-heading">
+          <div><h1 id="file-name"></h1></div>
+          <div class="workspace-status">
+            <div id="status-chip" class="status-chip status-idle" role="status" aria-live="polite">
+              <span id="status-spinner" class="spinner" aria-hidden="true" hidden></span>
+              <span id="phase-label"></span>
+            </div>
+            <span id="downscaled-notice" class="notice" hidden>縮小済み</span>
+            <button id="change-image" class="ghost-button" type="button">画像変更</button>
+          </div>
+        </div>
+
+        <div id="workspace-error" class="error-banner" role="alert" hidden>
+          <strong>画像を処理できませんでした</strong>
+          <span data-error-message></span>
+          <button class="choose-another" type="button">別の画像を選ぶ</button>
+        </div>
+
+        <section id="mobile-editor" class="mobile-document-editor" aria-label="用紙の切り出し範囲" hidden>
+          <header class="mobile-document-heading">
+            <div>
+              <h2>用紙の四隅</h2>
+              <p id="mobile-editor-description"></p>
+            </div>
+            <span id="mobile-detection-badge" class="document-manual">手動調整</span>
+          </header>
+          <div class="document-crop-stage">
+            <div id="document-crop-canvas" class="document-crop-canvas">
+              <div id="document-crop-overlay" class="document-crop-overlay">
+                <span class="document-crop-shade" aria-hidden="true"></span>
+                <span class="document-crop-shade" aria-hidden="true"></span>
+                <span class="document-crop-shade" aria-hidden="true"></span>
+                <span class="document-crop-shade" aria-hidden="true"></span>
+                <span class="document-crop-edge" aria-hidden="true"></span>
+                <span class="document-crop-edge" aria-hidden="true"></span>
+                <span class="document-crop-edge" aria-hidden="true"></span>
+                <span class="document-crop-edge" aria-hidden="true"></span>
+                <button class="document-corner-handle" type="button" aria-label="左上の角"><span aria-hidden="true">1</span></button>
+                <button class="document-corner-handle" type="button" aria-label="右上の角"><span aria-hidden="true">2</span></button>
+                <button class="document-corner-handle" type="button" aria-label="右下の角"><span aria-hidden="true">3</span></button>
+                <button class="document-corner-handle" type="button" aria-label="左下の角"><span aria-hidden="true">4</span></button>
+              </div>
+              <div id="document-crop-busy" class="document-crop-busy" role="status" hidden>
+                <span class="large-spinner" aria-hidden="true"></span>
+                <strong>用紙を整えています</strong>
+              </div>
+            </div>
+          </div>
+          <div class="mobile-document-actions">
+            <button id="extract-document" class="primary-button" type="button">この範囲を抽出</button>
+            <button id="retry-document" class="secondary-button" type="button">自動検出をやり直す</button>
+            <button id="skip-document" class="ghost-button" type="button">写真をそのまま使う</button>
+          </div>
+        </section>
+
+        <div id="processing-area">
+          <div id="comparison-workbench" class="comparison-workbench">
+            <div class="comparison-toolbar" aria-label="プレビュー表示設定">
+              <strong class="workbench-title">比較</strong>
+              <div class="comparison-actions">
+                <div class="zoom-toolbar">
+                  <button id="zoom-fit" class="expand-comparison-button zoom-fit active" type="button" aria-pressed="true">全体表示</button>
+                  <label class="zoom-range">
+                    <span>拡大</span>
+                    <input id="zoom-control" type="range" min="100" max="400" step="5" value="100" aria-label="表示倍率">
+                    <output id="zoom-output">全体</output>
+                  </label>
+                </div>
+                <button id="edit-toggle" class="expand-comparison-button" type="button" aria-pressed="false">手直し</button>
+                <button id="rotate-document" class="expand-comparison-button" type="button" title="原稿と復元後を時計回りに90度回転">回転</button>
+                <button id="save-image" class="expand-comparison-button" type="button">保存</button>
+                <button id="print-image" class="toolbar-primary-button" type="button">印刷</button>
+              </div>
+            </div>
+
+            <div id="edit-toolbar" class="edit-toolbar" role="toolbar" aria-label="手直しツール" hidden>
+              <div id="edit-tool-control" class="segmented-control">
+                <button type="button" data-edit-tool="erase" class="active" aria-pressed="true">消す</button>
+                <button type="button" data-edit-tool="restore" aria-pressed="false">元に戻す</button>
+              </div>
+              <label class="compact-range brush-range">
+                <span>太さ</span>
+                <input id="brush-size" type="range" min="12" max="72" value="34">
+              </label>
+              <button id="undo-edit" type="button" disabled>取り消す</button>
+              <button id="redo-edit" type="button" disabled>やり直す</button>
+            </div>
+
+            <div class="comparison">
+              <article class="preview-card">
+                <header>
+                  <h2>元画像</h2>
+                  <small id="image-dimensions"></small>
+                </header>
+                <div id="source-stage" class="canvas-stage">
+                  <div id="source-surface" class="canvas-surface">
+                    <canvas id="source-canvas" aria-label="元画像のプレビュー"></canvas>
+                  </div>
+                </div>
+              </article>
+
+              <article class="preview-card">
+                <header>
+                  <h2>復元後</h2>
+                  <span id="editing-chip" class="editing-chip" hidden>手直し中</span>
+                </header>
+                <div id="result-stage" class="canvas-stage result-stage">
+                  <div id="result-surface" class="canvas-surface">
+                    <canvas id="result-canvas" aria-label="処理済み画像のプレビュー"></canvas>
+                    <span id="edit-cursor" class="edit-cursor edit-cursor-erase" aria-hidden="true" hidden></span>
+                  </div>
+                  <div id="processing-overlay" class="processing-overlay" hidden>
+                    <span class="large-spinner"></span>
+                    <strong id="overlay-phase-label"></strong>
+                  </div>
+                </div>
+              </article>
+            </div>
+          </div>
+
+          <section class="control-panel" aria-label="復元ツール">
+            <div class="tool-row">
+              <div class="tool-group">
+                <span class="tool-label">除去</span>
+                <div id="cleaning-mode" class="segmented-control" aria-label="除去対象">
+                  <button type="button" data-mode="auto" class="active" aria-pressed="true">自動</button>
+                  <button type="button" data-mode="color" aria-pressed="false">赤ペン</button>
+                  <button type="button" data-mode="pencil" aria-pressed="false">鉛筆</button>
+                </div>
+              </div>
+              <label class="compact-range">
+                <span>強さ</span>
+                <input id="strength" type="range" min="1" max="5" value="3" aria-label="検出の強さ 3">
+                <output id="strength-output">3</output>
+              </label>
+              <button id="reprocess" class="secondary-button" type="button">再処理</button>
+              <div id="reference-present" class="reference-compact" hidden>
+                <span id="reference-label">未記入原稿あり</span>
+                <button id="remove-reference" type="button">解除</button>
+              </div>
+              <button id="choose-reference" class="secondary-button" type="button">未記入原稿</button>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <input id="image-input" type="file" tabindex="-1" aria-hidden="true" accept="image/*,.jpg,.jpeg,.jfif,.png,.webp,.avif,.bmp,.heic,.heif" hidden>
+      <input id="reference-input" type="file" tabindex="-1" aria-hidden="true" accept="image/*,.jpg,.jpeg,.jfif,.png,.webp,.avif,.bmp,.heic,.heif" hidden>
+      <canvas id="reference-canvas" class="visually-hidden" aria-hidden="true"></canvas>
+    </main>
+    <section class="print-sheet" aria-hidden="true"><canvas id="print-canvas"></canvas></section>
+  </body>
+</html>

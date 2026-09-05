@@ -522,6 +522,7 @@
           strength: state.strength,
           removeColor: state.removeColor,
           removePencil: state.removePencil,
+          suppressPaper: true,
           reference: referenceImageData ? { data: referenceImageData.data, width: referenceImageData.width, height: referenceImageData.height } : null,
         },
       }, transfers);

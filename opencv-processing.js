@@ -4,7 +4,7 @@ const DEFAULT_OPTIONS = {
   removePencil: true,
   reference: null,
 };
-const COLOR_INK_MIN_SATURATION = 56;
+const COLOR_INK_MIN_SATURATION = 36;
 const COLOR_INK_GROWTH_SATURATION = 10;
 const COLOR_INK_GROWTH_SEED_RATIO = 0.0005;
 
@@ -18,7 +18,17 @@ export function isRedInkPixel(red, green, blue, minimumSaturation = COLOR_INK_MI
   const saturation = maximum ? ((maximum - minimum) / maximum) * 255 : 0;
   const redDominance = red - (green + blue) / 2;
   const threshold = Math.max(6, 22 - (maximum - 120) * 0.1);
-  return redDominance > threshold && saturation >= minimumSaturation;
+  // Brown/black print under a warm phone shadow can be saturated because its
+  // blue channel collapses.  A red correction mark must also separate clearly
+  // from green, not merely from blue.
+  const greenGap = maximum >= 220 ? 18 : 28;
+  // At very low value, shadowed black print often has a warm cast.  Accept it
+  // as red only when it is an unequivocally red pen core; the surrounding red
+  // fringe is recovered through the connected-mask growth below.
+  const isDarkRedCore = maximum < 90 && red >= green + 45 && red >= blue + 35;
+  if (maximum < 90 && !isDarkRedCore) return false;
+  return redDominance > threshold && red >= green + greenGap && red >= blue + 20 &&
+    saturation >= minimumSaturation;
 }
 
 function validateImage(image) {
@@ -693,13 +703,24 @@ export function restoreDetectedStructures(
         const y = vertical ? along : coordinate + distance;
         if (x < 0 || x >= width || y < 0 || y >= height) continue;
         const pixel = y * width + x;
+        const offset = pixel * 4;
+        const outputBrightness =
+          output[offset] * 0.299 + output[offset + 1] * 0.587 + output[offset + 2] * 0.114;
         if (distance === 0 && mask[pixel] && isNeutralLinePixel(source, gray, pixel)) {
-          const offset = pixel * 4;
           output.set(source.subarray(offset, offset + 4), offset);
           continue;
         }
         if (Math.abs(distance) <= 1) {
           const expected = distance === 0 ? line : blendColor(line, paper, 0.5);
+          // Inpainting commonly leaves a pure-white hole where a red grading
+          // circle crossed a black answer-box border. A detected border is a
+          // stronger signal than that hole: redraw only its centre band, never
+          // the answer area.
+          if (mask[pixel] && outputBrightness > 228 && expected[0] + expected[1] + expected[2] < 630) {
+            writeColor(output, pixel, expected);
+            markRepaired(pixel);
+            continue;
+          }
           repairAnomaly(pixel, expected, lineSpread);
         } else {
           repairAnomaly(pixel, paper, paperSpread);
@@ -828,7 +849,10 @@ export function whitenFinalPaperBackground(output, width, height) {
       const paperProbability =
         smoothstep(182, 229, brightness) *
         (1 - smoothstep(12, 38, chroma)) *
-        (1 - smoothstep(5, 24, edge));
+        // A phone photograph can make the lightest printed characters only a
+        // few levels darker than the paper. Treat those small local edges as
+        // structure before whitening; smooth shadows have virtually no edge.
+        (1 - smoothstep(3, 16, edge));
       if (paperProbability < 0.48) continue;
       output[offset] = 255;
       output[offset + 1] = 255;
@@ -964,7 +988,9 @@ export function processWithOpenCv(cv, core, image, userOptions = {}) {
 
     const longLines = createLongLineMask(cv, gray);
     const printGuard = dilateMask(cv, darkCoreRaw, width, height);
-    let colorMask = openAndDilateMask(cv, colorRaw, width, height);
+    // Red correction strokes can be only one pixel wide after a phone scan.
+    // Do not erode those seeds before the later print-protection checks.
+    let colorMask = openAndDilateMask(cv, colorRaw, width, height, 1);
     for (let pixel = 0; pixel < pixelCount; pixel += 1) {
       if (
         (saturation[pixel] < 14 && value[pixel] < 135) ||
@@ -1003,12 +1029,24 @@ export function processWithOpenCv(cv, core, image, userOptions = {}) {
       }
     }
 
-    let pencilMask = openAndDilateMask(cv, pencilRaw, width, height);
+    // Answer boxes provide a far stronger location prior than luminance alone.
+    // Start with no whole-page pencil removal; its raw luminance mask is only
+    // used as a fallback below when a page contains no recognised answer box.
+    let pencilMask = new Uint8Array(pixelCount);
     let structures = [];
     if (options.removePencil || options.removeColor) {
       const boxAnalysis = createAnswerBoxMask(cv, gray, saturation, data);
       structures = boxAnalysis.structures;
       const expandedBoxes = dilateMask(cv, boxAnalysis.mask, width, height);
+      // A photographed shadow can make the pale anti-aliased edge of printed
+      // text look like pencil. Once a repeated answer-box layout is known,
+      // the box interiors are the reliable handwriting region. Do not let the
+      // weaker whole-page pencil heuristic erase the surrounding question text.
+      if (options.removePencil && boxAnalysis.mask.some((value) => value !== 0)) {
+        pencilMask = expandedBoxes;
+      } else if (options.removePencil) {
+        pencilMask = openAndDilateMask(cv, pencilRaw, width, height);
+      }
       for (let pixel = 0; pixel < pixelCount; pixel += 1) {
         if (options.removePencil && expandedBoxes[pixel]) pencilMask[pixel] = 255;
       }
@@ -1054,16 +1092,43 @@ export function processWithOpenCv(cv, core, image, userOptions = {}) {
       height,
       structures,
     );
-    // Run after detection, removal, and structure restoration so background
-    // whitening cannot change the input used to decide what should be erased.
-    whitenFinalPaperBackground(output, width, height);
+    // Perspective extraction already performs illumination normalization.
+    // A second per-pixel whitening pass cannot distinguish a faint printed
+    // glyph from paper in a shadowed phone photo, so it caused valid question
+    // text to disappear. Keep the cleaned reconstruction intact here.
 
-    return {
+    const result = {
       data: output,
       width,
       height,
     };
+    if (options.debugMasks) result.debugMasks = { colorMask, pencilMask, mask };
+    return result;
   } finally {
     deleteMats(sourceRgba, gray, localBackground);
   }
+}
+
+export function processMatWithOpenCv(cv, core, inputMat, userOptions = {}) {
+  assertOpenCvCapabilities(cv);
+  if (
+    !inputMat ||
+    !Number.isInteger(inputMat.cols) ||
+    !Number.isInteger(inputMat.rows) ||
+    inputMat.cols <= 0 ||
+    inputMat.rows <= 0 ||
+    !inputMat.data ||
+    inputMat.data.length !== inputMat.cols * inputMat.rows * 4
+  ) {
+    throw new Error("INVALID_RGBA_MAT");
+  }
+
+  const result = processWithOpenCv(cv, core, {
+    data: new Uint8ClampedArray(inputMat.data),
+    width: inputMat.cols,
+    height: inputMat.rows,
+  }, userOptions);
+  const output = createMat(cv, result.height, result.width, cv.CV_8UC4, result.data);
+  if (result.debugMasks) output.debugMasks = result.debugMasks;
+  return output;
 }

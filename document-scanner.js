@@ -31,6 +31,12 @@ function deleteMats(...mats) {
   }
 }
 
+function createRgbaMat(cv, image) {
+  const mat = new cv.Mat(image.height, image.width, cv.CV_8UC4);
+  mat.data.set(image.data);
+  return mat;
+}
+
 function distance(first, second) {
   return Math.hypot(second.x - first.x, second.y - first.y);
 }
@@ -184,11 +190,397 @@ function findPaperQuadrilateral(cv, rgba) {
   }
 }
 
+function findCannyQuadrilateral(cv, rgba) {
+  const gray = new cv.Mat();
+  const blurred = new cv.Mat();
+  const edges = new cv.Mat();
+  const contours = new cv.MatVector();
+  const hierarchy = new cv.Mat();
+  const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(31, 31));
+  try {
+    cv.cvtColor(rgba, gray, cv.COLOR_RGBA2GRAY);
+    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+    cv.Canny(blurred, edges, 15, 45);
+    cv.morphologyEx(edges, edges, cv.MORPH_CLOSE, kernel);
+    cv.findContours(edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+    const imageArea = rgba.cols * rgba.rows;
+    let best = null;
+    for (let index = 0; index < contours.size(); index += 1) {
+      const contour = contours.get(index);
+      const approximation = new cv.Mat();
+      try {
+        const area = cv.contourArea(contour, false);
+        if (area / imageArea < 0.18) continue;
+        cv.approxPolyDP(contour, approximation, cv.arcLength(contour, true) * 0.03, true);
+        if (approximation.rows !== 4) continue;
+        const points = orderDocumentCorners(readContourPoints(approximation));
+        if (!best || area > best.score) best = { points, score: area, coverage: area / imageArea };
+      } finally {
+        deleteMats(contour, approximation);
+      }
+    }
+    return best;
+  } finally {
+    deleteMats(gray, blurred, edges, contours, hierarchy, kernel);
+  }
+}
+
+function findOtsuQuadrilateral(cv, rgba) {
+  const gray = new cv.Mat();
+  const blurred = new cv.Mat();
+  const paper = new cv.Mat();
+  const contours = new cv.MatVector();
+  const hierarchy = new cv.Mat();
+  let kernel = null;
+  try {
+    cv.cvtColor(rgba, gray, cv.COLOR_RGBA2GRAY);
+    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+    cv.threshold(blurred, paper, 0, 255, cv.THRESH_BINARY | cv.THRESH_OTSU);
+    let closeSize = Math.max(11, Math.round(Math.min(rgba.cols, rgba.rows) * 0.025));
+    if (closeSize % 2 === 0) closeSize += 1;
+    kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(closeSize, closeSize));
+    cv.morphologyEx(paper, paper, cv.MORPH_CLOSE, kernel);
+    cv.findContours(paper, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    const imageArea = rgba.cols * rgba.rows;
+    let best = null;
+    for (let index = 0; index < contours.size(); index += 1) {
+      const contour = contours.get(index);
+      const hull = new cv.Mat();
+      try {
+        const area = cv.contourArea(contour, false);
+        if (area / imageArea < 0.18) continue;
+        cv.convexHull(contour, hull, false, true);
+        const perimeter = cv.arcLength(hull, true);
+        const approximation = new cv.Mat();
+        try {
+          cv.approxPolyDP(hull, approximation, perimeter * 0.02, true);
+          if (approximation.rows !== 4) continue;
+          const points = orderDocumentCorners(readContourPoints(approximation));
+          const coverage = polygonArea(points) / imageArea;
+          if (coverage < 0.18) continue;
+          if (!best || coverage > best.coverage) best = { points, score: coverage, coverage };
+        } finally {
+          approximation.delete();
+        }
+      } finally {
+        deleteMats(contour, hull);
+      }
+    }
+    return best;
+  } finally {
+    deleteMats(gray, blurred, paper, contours, hierarchy, kernel);
+  }
+}
+
+function lineIntersection(first, second) {
+  const denominator = first.a * second.b - second.a * first.b;
+  if (Math.abs(denominator) < 1e-6) return null;
+  return {
+    x: (first.b * second.c - second.b * first.c) / denominator,
+    y: (second.a * first.c - first.a * second.c) / denominator,
+  };
+}
+
+function findHoughQuadrilateral(cv, rgba) {
+  const gray = new cv.Mat();
+  const blurred = new cv.Mat();
+  const edges = new cv.Mat();
+  const lines = new cv.Mat();
+  try {
+    cv.cvtColor(rgba, gray, cv.COLOR_RGBA2GRAY);
+    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+    // Do not close the edge map here: that joins the desk with the sheet.
+    cv.Canny(blurred, edges, 18, 65);
+    const shortSide = Math.min(rgba.cols, rgba.rows);
+    cv.HoughLinesP(
+      edges,
+      lines,
+      1,
+      Math.PI / 180,
+      Math.max(34, Math.round(shortSide * 0.035)),
+      Math.max(70, Math.round(shortSide * 0.15)),
+      Math.max(40, Math.round(shortSide * 0.06)),
+    );
+
+    const horizontal = [];
+    const vertical = [];
+    for (let index = 0; index < lines.rows; index += 1) {
+      const offset = index * 4;
+      const x1 = lines.data32S[offset];
+      const y1 = lines.data32S[offset + 1];
+      const x2 = lines.data32S[offset + 2];
+      const y2 = lines.data32S[offset + 3];
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const length = Math.hypot(dx, dy);
+      if (length === 0) continue;
+      // ax + by + c = 0, normalized so line intersections stay stable.
+      const a = dy / length;
+      const b = -dx / length;
+      const c = -(a * x1 + b * y1);
+      const line = { a, b, c, length, x: (x1 + x2) / 2, y: (y1 + y2) / 2 };
+      if (Math.abs(dx) / length >= 0.88) horizontal.push(line);
+      if (Math.abs(dy) / length >= 0.88) vertical.push(line);
+    }
+    if (horizontal.length < 2 || vertical.length < 2) return null;
+
+    const longestIn = (candidates) => candidates.reduce(
+      (best, line) => (!best || line.length > best.length ? line : best),
+      null,
+    );
+    // Each side is selected from its own half of the image. This avoids a long
+    // printed rule being paired with a camera-frame edge on the opposite side.
+    const top = longestIn(horizontal.filter((line) => line.y < rgba.rows * 0.45));
+    const bottom = longestIn(horizontal.filter((line) => line.y > rgba.rows * 0.55));
+    const left = longestIn(vertical.filter((line) => line.x < rgba.cols * 0.45));
+    const right = longestIn(vertical.filter((line) => line.x > rgba.cols * 0.55));
+    if (!top || !bottom || !left || !right) return null;
+
+    const points = orderDocumentCorners([
+      lineIntersection(top, left),
+      lineIntersection(top, right),
+      lineIntersection(bottom, right),
+      lineIntersection(bottom, left),
+    ]);
+    if (points.some((point) => !point || point.x < 0 || point.y < 0 || point.x > rgba.cols || point.y > rgba.rows)) {
+      return null;
+    }
+    const coverage = polygonArea(points) / (rgba.cols * rgba.rows);
+    return coverage >= 0.18 ? { points, score: coverage, coverage } : null;
+  } finally {
+    deleteMats(gray, blurred, edges, lines);
+  }
+}
+
+function fitDirectedEdge(samples, horizontal) {
+  const count = samples.length;
+  const meanIndependent = samples.reduce((sum, sample) => sum + sample.independent, 0) / count;
+  const meanDependent = samples.reduce((sum, sample) => sum + sample.dependent, 0) / count;
+  const variance = samples.reduce((sum, sample) => sum + (sample.independent - meanIndependent) ** 2, 0);
+  const covariance = samples.reduce((sum, sample) =>
+    sum + (sample.independent - meanIndependent) * (sample.dependent - meanDependent), 0,
+  );
+  const slope = variance > 0 ? covariance / variance : 0;
+  const intercept = meanDependent - slope * meanIndependent;
+  const residual = Math.max(...samples.map((sample) =>
+    Math.abs(sample.dependent - (slope * sample.independent + intercept)),
+  ));
+  return horizontal
+    ? { a: slope, b: -1, c: intercept, residual }
+    : { a: 1, b: -slope, c: -intercept, residual };
+}
+
+function findDirectedEdgeQuadrilateral(cv, rgba, edgeThresholdRatio = 0.40) {
+  const gray = new cv.Mat();
+  const blurred = new cv.Mat();
+  const gradientX = new cv.Mat();
+  const gradientY = new cv.Mat();
+  const edgeX = new cv.Mat();
+  const edgeY = new cv.Mat();
+  try {
+    cv.cvtColor(rgba, gray, cv.COLOR_RGBA2GRAY);
+    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+    cv.Sobel(blurred, gradientX, cv.CV_16S, 1, 0, 3);
+    cv.Sobel(blurred, gradientY, cv.CV_16S, 0, 1, 3);
+    cv.convertScaleAbs(gradientX, edgeX);
+    cv.convertScaleAbs(gradientY, edgeY);
+    const positions = Array.from({ length: 11 }, (_, index) => 0.14 + index * 0.072);
+    const findSide = (horizontal, fromFarSide) => {
+      const magnitude = horizontal ? edgeY.data : edgeX.data;
+      const limit = Math.round((horizontal ? rgba.rows : rgba.cols) * 0.32);
+      const profile = [];
+      for (let offset = 2; offset < limit; offset += 1) {
+        let total = 0;
+        for (const fraction of positions) {
+          const fixed = Math.round((horizontal ? rgba.cols : rgba.rows) * fraction);
+          const variable = fromFarSide
+            ? (horizontal ? rgba.rows - 1 - offset : rgba.cols - 1 - offset)
+            : offset;
+          total += magnitude[(horizontal ? variable * rgba.cols + fixed : fixed * rgba.cols + variable)];
+        }
+        profile.push(total / positions.length);
+      }
+      const strongest = Math.max(...profile);
+      // Find the first page-wide strong transition while moving inward. A rule
+      // printed on the sheet can be dark, but it is not the first wide edge.
+      const threshold = strongest * edgeThresholdRatio;
+      const centerOffset = profile.findIndex((strength) => strength >= threshold) + 2;
+      if (centerOffset < 2) return null;
+      const center = fromFarSide
+        ? (horizontal ? rgba.rows - 1 - centerOffset : rgba.cols - 1 - centerOffset)
+        : centerOffset;
+      const radius = Math.max(10, Math.round((horizontal ? rgba.rows : rgba.cols) * 0.035));
+      const samples = [];
+      for (const fraction of positions) {
+        const fixed = Math.round((horizontal ? rgba.cols : rgba.rows) * fraction);
+        let best = null;
+        for (let variable = Math.max(2, center - radius); variable <= Math.min((horizontal ? rgba.rows : rgba.cols) - 3, center + radius); variable += 1) {
+          const x = horizontal ? fixed : variable;
+          const y = horizontal ? variable : fixed;
+          const strength = magnitude[y * rgba.cols + x];
+          if (!best || strength > best.score) best = { variable, score: strength };
+        }
+        if (best) samples.push({ independent: fixed, dependent: best.variable });
+      }
+      return fitDirectedEdge(samples, horizontal);
+    };
+    const top = findSide(true, false);
+    const bottom = findSide(true, true);
+    const left = findSide(false, false);
+    const right = findSide(false, true);
+    if (!top || !bottom || !left || !right) return null;
+    const maxResidual = Math.max(top.residual, bottom.residual, left.residual, right.residual);
+    if (maxResidual > Math.min(rgba.cols, rgba.rows) * 0.18) return null;
+    const points = [
+      lineIntersection(top, left),
+      lineIntersection(top, right),
+      lineIntersection(bottom, right),
+      lineIntersection(bottom, left),
+    ];
+    if (points.some((point) => !point || point.x < 0 || point.y < 0 || point.x > rgba.cols || point.y > rgba.rows)) {
+      return null;
+    }
+    const ordered = orderDocumentCorners(points);
+    const coverage = polygonArea(ordered) / (rgba.cols * rgba.rows);
+    return coverage >= 0.18 ? { points: ordered, score: coverage, coverage } : null;
+  } finally {
+    deleteMats(gray, blurred, gradientX, gradientY, edgeX, edgeY);
+  }
+}
+
+// A page can legitimately be close to one image boundary, but a candidate that
+// reaches the camera frame is often the desk/floor merged into the paper mask.
+// Check every edge: the old left-edge-only check missed the same failure on the
+// top, right, and bottom sides.
+function candidateTouchesFrame(candidate, width, height, margin = 0.025) {
+  return candidate?.points.some((point) =>
+    point.x <= width * margin ||
+    point.y <= height * margin ||
+    point.x >= width * (1 - margin) ||
+    point.y >= height * (1 - margin),
+  ) || false;
+}
+
+function luminanceAt(rgba, x, y) {
+  const offset = (Math.round(y) * rgba.cols + Math.round(x)) * 4;
+  return rgba.data[offset] * 0.299 + rgba.data[offset + 1] * 0.587 + rgba.data[offset + 2] * 0.114;
+}
+
+function candidateReliability(rgba, candidate) {
+  if (!candidate) return -Infinity;
+  const { points } = candidate;
+  const center = points.reduce(
+    (sum, point) => ({ x: sum.x + point.x / 4, y: sum.y + point.y / 4 }),
+    { x: 0, y: 0 },
+  );
+  let edgeScore = 0;
+  let measuredEdges = 0;
+  for (let index = 0; index < 4; index += 1) {
+    const first = points[index];
+    const second = points[(index + 1) % 4];
+    const dx = second.x - first.x;
+    const dy = second.y - first.y;
+    const length = Math.hypot(dx, dy);
+    if (length < 1) continue;
+    let contrast = 0;
+    let samples = 0;
+    for (let step = 1; step < 8; step += 1) {
+      const t = step / 8;
+      const x = first.x + dx * t;
+      const y = first.y + dy * t;
+      const inwardX = center.x - x;
+      const inwardY = center.y - y;
+      const inwardLength = Math.hypot(inwardX, inwardY);
+      if (inwardLength < 1) continue;
+      const offsetX = inwardX / inwardLength * 5;
+      const offsetY = inwardY / inwardLength * 5;
+      const insideX = x + offsetX;
+      const insideY = y + offsetY;
+      const outsideX = x - offsetX;
+      const outsideY = y - offsetY;
+      if (
+        insideX < 0 || insideY < 0 || insideX >= rgba.cols || insideY >= rgba.rows ||
+        outsideX < 0 || outsideY < 0 || outsideX >= rgba.cols || outsideY >= rgba.rows
+      ) continue;
+      contrast += Math.abs(luminanceAt(rgba, insideX, insideY) - luminanceAt(rgba, outsideX, outsideY));
+      samples += 1;
+    }
+    if (samples) {
+      edgeScore += clamp((contrast / samples - 10) / 38, 0, 1);
+      measuredEdges += 1;
+    }
+  }
+  edgeScore /= 4;
+  let rightAngleScore = 0;
+  for (let index = 0; index < 4; index += 1) {
+    const previous = points[(index + 3) % 4];
+    const current = points[index];
+    const next = points[(index + 1) % 4];
+    const firstLength = distance(current, previous);
+    const secondLength = distance(current, next);
+    if (firstLength < 1 || secondLength < 1) continue;
+    const cosine = ((previous.x - current.x) * (next.x - current.x) + (previous.y - current.y) * (next.y - current.y)) /
+      (firstLength * secondLength);
+    rightAngleScore += 1 - Math.min(1, Math.abs(cosine));
+  }
+  rightAngleScore /= 4;
+  const coverageScore = smoothstep(0.18, 0.52, candidate.coverage);
+  const framePenalty = candidateTouchesFrame(candidate, rgba.cols, rgba.rows) ? 0.13 : 0;
+  // No individual detector is trusted. A real page boundary has evidence on
+  // several sides, while a desk merged into a mask usually lacks it at least
+  // on the frame-facing side.
+  return clamp(
+    edgeScore * 0.58 + rightAngleScore * 0.20 + coverageScore * 0.14 + (measuredEdges / 4) * 0.08 - framePenalty,
+    0,
+    1,
+  );
+}
+
+function candidateCornerDistance(first, second, width, height) {
+  return first.points.reduce((sum, point, index) => {
+    const other = second.points[index];
+    return sum + Math.hypot((point.x - other.x) / width, (point.y - other.y) / height);
+  }, 0) / 4;
+}
+
+function scoreCandidates(rgba, candidates) {
+  for (const item of candidates) item.reliability = candidateReliability(rgba, item);
+  for (const item of candidates) {
+    const others = candidates.filter((other) => other !== item);
+    if (!others.length) {
+      item.agreement = 1;
+      continue;
+    }
+    // A near-identical corner set from independent detectors is useful
+    // corroboration. It is deliberately a small part of the total, because
+    // several detectors can share the same failure on a strongly lit desk.
+    item.agreement = others.reduce((sum, other) =>
+      sum + Math.exp(-candidateCornerDistance(item, other, rgba.cols, rgba.rows) / 0.055),
+    0) / others.length;
+    item.reliability = item.reliability * 0.88 + item.agreement * 0.12;
+  }
+  candidates.sort((first, second) => second.reliability - first.reliability);
+}
+
+function tagCandidate(candidate, method) {
+  return candidate ? { ...candidate, method } : null;
+}
+
+function describeCandidate(candidate, width, height) {
+  if (!candidate) return null;
+  return {
+    method: candidate.method,
+    coverage: candidate.coverage,
+    reliability: candidate.reliability,
+    agreement: candidate.agreement,
+    touchesFrame: candidateTouchesFrame(candidate, width, height),
+    corners: candidate.points.map((point) => ({ x: point.x / width, y: point.y / height })),
+  };
+}
+
 export function detectDocument(cv, image) {
   validateImage(image);
-  const input = cv.matFromImageData(
-    new ImageData(new Uint8ClampedArray(image.data), image.width, image.height),
-  );
+  const input = createRgbaMat(cv, image);
   const resized = new cv.Mat();
   try {
     const scale = Math.min(1, DETECTION_MAX_DIMENSION / Math.max(image.width, image.height));
@@ -204,7 +596,34 @@ export function detectDocument(cv, image) {
     } else {
       input.copyTo(resized);
     }
-    const candidate = findPaperQuadrilateral(cv, resized);
+    // Use independent evidence. HSV is resilient to shadows, while Otsu is
+    // much better when a wood desk has a similar low-saturation colour to the
+    // sheet. Running both on the small detection image is inexpensive and
+    // avoids trusting the first large contour blindly.
+    const colorCandidate = tagCandidate(findPaperQuadrilateral(cv, resized), "hsv");
+    const otsuCandidate = tagCandidate(findOtsuQuadrilateral(cv, resized), "otsu");
+    const cannyCandidate = tagCandidate(findCannyQuadrilateral(cv, resized), "canny");
+    const houghCandidate = tagCandidate(findHoughQuadrilateral(cv, resized), "hough");
+    const directedCandidate = tagCandidate(findDirectedEdgeQuadrilateral(cv, resized), "directed-edge");
+    let candidates = [colorCandidate, otsuCandidate, cannyCandidate, houghCandidate, directedCandidate]
+      .filter(Boolean);
+    scoreCandidates(resized, candidates);
+
+    // Re-run only when the evidence is weak or ambiguous. Different outward
+    // scan thresholds are genuinely independent observations; merely swapping
+    // a fixed detector priority would repeat the same mistake.
+    const firstPass = candidates[0];
+    const secondPass = candidates[1];
+    if (
+      firstPass &&
+      (firstPass.reliability < 0.62 || firstPass.reliability - (secondPass?.reliability ?? 0) < 0.075)
+    ) {
+      const relaxedDirected = tagCandidate(findDirectedEdgeQuadrilateral(cv, resized, 0.34), "directed-edge-relaxed");
+      const strictDirected = tagCandidate(findDirectedEdgeQuadrilateral(cv, resized, 0.48), "directed-edge-strict");
+      for (const item of [relaxedDirected, strictDirected]) if (item) candidates.push(item);
+      scoreCandidates(resized, candidates);
+    }
+    const candidate = candidates[0];
     if (!candidate) {
       return { corners: defaultDocumentCorners(), confidence: 0, detected: false };
     }
@@ -215,6 +634,10 @@ export function detectDocument(cv, image) {
       })),
       confidence: clamp((candidate.coverage - 0.18) / 0.62, 0.2, 1),
       detected: true,
+      method: candidate.method,
+      diagnostics: {
+        candidates: candidates.map((item) => describeCandidate(item, resized.cols, resized.rows)),
+      },
     };
   } finally {
     deleteMats(input, resized);
@@ -359,9 +782,7 @@ export function extractDocument(cv, image, userOptions = {}) {
   }));
   const sourceCorners = insetCorners(pixelCorners, EDGE_INSET_RATIO);
   const size = calculateDocumentSize(sourceCorners, OUTPUT_MAX_PIXELS);
-  const input = cv.matFromImageData(
-    new ImageData(new Uint8ClampedArray(image.data), image.width, image.height),
-  );
+  const input = createRgbaMat(cv, image);
   const warped = new cv.Mat();
   const sourcePoints = cv.matFromArray(
     4,

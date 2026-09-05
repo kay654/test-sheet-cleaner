@@ -130,7 +130,28 @@ self.addEventListener("message", async (event) => {
     } else if (action === "extract-document") {
       result = scanner.extractDocument(openCv.instance, image, options);
     } else if (action === "clean") {
-      result = processor.processWithOpenCv(openCv.instance, core, image, options);
+      let inputMat = null;
+      let outputMat = null;
+      try {
+        inputMat = new openCv.instance.Mat(image.height, image.width, openCv.instance.CV_8UC4);
+        inputMat.data.set(image.data);
+        outputMat = processor.processMatWithOpenCv(openCv.instance, core, inputMat, options);
+        const pixels = options.suppressPaper !== false && !options.reference
+          ? scanner.suppressPaperBackground(
+            new Uint8ClampedArray(outputMat.data),
+            outputMat.cols,
+            outputMat.rows,
+          )
+          : new Uint8ClampedArray(outputMat.data);
+        result = {
+          data: pixels,
+          width: outputMat.cols,
+          height: outputMat.rows,
+        };
+      } finally {
+        outputMat?.delete();
+        inputMat?.delete();
+      }
     } else {
       throw new Error("UNKNOWN_PROCESSOR_ACTION");
     }

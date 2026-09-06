@@ -122,7 +122,11 @@ export function detectReferenceMask(image, reference, strength = 3) {
     throw new Error("REFERENCE_SIZE_MISMATCH");
   }
   const mask = new Uint8Array(width * height);
-  const threshold = 17 - clamp(Number(strength) || 3, 1, 5) * 2;
+  // Keep the low end deliberately conservative, while making level 5 pick up
+  // faint writing that differs from the blank sheet by only a few levels.
+  const normalizedStrength = clamp(Number(strength) || 3, 1, 5);
+  const threshold = 22 - normalizedStrength * 4;
+  const chromaThreshold = 31 - normalizedStrength * 4;
   for (let pixel = 0; pixel < mask.length; pixel += 1) {
     const offset = pixel * 4;
     const red = data[offset];
@@ -137,7 +141,7 @@ export function detectReferenceMask(image, reference, strength = 3) {
     const chromaDelta =
       Math.abs((red - green) - (referenceRed - referenceGreen)) +
       Math.abs((green - blue) - (referenceGreen - referenceBlue));
-    if (darkDelta > threshold || chromaDelta > 23) mask[pixel] = 1;
+    if (darkDelta > threshold || chromaDelta > chromaThreshold) mask[pixel] = 1;
   }
   return dilateMask(mask, width, height);
 }

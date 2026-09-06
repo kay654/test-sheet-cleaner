@@ -126,7 +126,7 @@ self.addEventListener("message", async (event) => {
     const [core, processor, scanner, openCv] = await modulesReady;
     let result;
     if (action === "detect-document") {
-      result = scanner.detectDocument(openCv.instance, image);
+      result = scanner.detectDocument(openCv.instance, image, options);
     } else if (action === "extract-document") {
       result = scanner.extractDocument(openCv.instance, image, options);
     } else if (action === "clean") {

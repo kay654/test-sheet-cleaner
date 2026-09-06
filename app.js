@@ -54,7 +54,7 @@
     referenceReady: false, worker: null, workerFailure: null, workerRequestId: 0,
     editBase: null, editHistory: [], editRedo: [], currentStroke: null,
     syncingScroll: false, scrollSyncFrame: null, cropLayoutFrame: null, activeCorner: null, heicLoader: null,
-    sessionRevision: 0, processingRevision: 0,
+    sessionRevision: 0, processingRevision: 0, documentDetectionAttempt: 0,
     workerCancellations: new Set(),
   };
 
@@ -275,10 +275,12 @@
       });
     }
     elements.strength.value = String(state.strength);
-    elements.strength.setAttribute("aria-label", `検出の強さ ${state.strength}`);
+    elements.strength.setAttribute("aria-label", `検出の強さ ${state.strength}（1:控えめ、5:強力）`);
     elements.strengthOutput.textContent = String(state.strength);
-    elements.reprocess.disabled = busy || !hasImage || Boolean(state.referenceName);
-    elements.strength.disabled = Boolean(state.referenceName);
+    elements.reprocess.disabled = busy || !hasImage;
+    // The blank-sheet path also honours strength, so keep it adjustable rather
+    // than silently locking it to the value selected before the reference.
+    elements.strength.disabled = busy || !hasImage;
     [...elements.cleaningMode.querySelectorAll("button")].forEach((button) => { button.disabled = Boolean(state.referenceName); });
     setHidden(elements.referencePresent, !state.referenceName);
     elements.referenceLabel.textContent = "未記入原稿あり";
@@ -567,6 +569,7 @@
       const detection = await requestWorker({
         action: "detect-document",
         image: { data: imageData.data, width: imageData.width, height: imageData.height },
+        options: { attempt: runtime.documentDetectionAttempt },
       }, [imageData.data.buffer]);
       if (!isCurrentSession(sessionRevision)) return;
       state.mobileDocument = {
@@ -660,6 +663,7 @@
       return;
     }
     runtime.referenceReady = false;
+    runtime.documentDetectionAttempt = 0;
     elements.referenceCanvas.width = 0;
     elements.referenceCanvas.height = 0;
     const useMobileScanner = state.mobileDevice && !allowInternalSvg;
@@ -1051,7 +1055,10 @@
     elements.chooseReference.addEventListener("click", () => elements.referenceInput.click());
     byId("remove-reference").addEventListener("click", removeReference);
     elements.extract.addEventListener("click", () => void extractMobileDocument());
-    elements.retry.addEventListener("click", () => void detectDocumentFromCanvas());
+    elements.retry.addEventListener("click", () => {
+      runtime.documentDetectionAttempt += 1;
+      void detectDocumentFromCanvas();
+    });
     elements.skip.addEventListener("click", () => void acceptOriginalMobilePhoto());
     elements.sourceStage.addEventListener("scroll", () => synchronizePreviewScroll(elements.sourceStage, elements.resultStage), { passive: true });
     elements.resultStage.addEventListener("scroll", () => synchronizePreviewScroll(elements.resultStage, elements.sourceStage), { passive: true });
@@ -1066,6 +1073,9 @@
     [...elements.cropOverlay.querySelectorAll(".document-corner-handle")].forEach((handle, index) => {
       handle.addEventListener("pointerdown", (event) => {
         if (!state.mobileDocument || state.mobileDocument.status !== "editing") return;
+        // iOS can otherwise turn a held corner label into a text-selection
+        // gesture before pointer capture begins.
+        event.preventDefault();
         runtime.activeCorner = index;
         handle.setPointerCapture(event.pointerId);
         moveCorner(event, index);
@@ -1084,6 +1094,7 @@
         updateCorner(index, corner.x + movement[0], corner.y + movement[1]);
       });
     });
+    elements.cropOverlay.addEventListener("contextmenu", (event) => event.preventDefault());
 
     window.addEventListener("keydown", (event) => {
       if (event.key === "Escape") {

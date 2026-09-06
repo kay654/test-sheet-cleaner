@@ -399,9 +399,14 @@ export function findOpenBoxCandidates(
   return candidates;
 }
 
-function createAnswerBoxMask(cv, gray, saturation, source) {
+function createAnswerBoxMask(cv, gray, saturation, source, strength) {
   const width = gray.cols;
   const height = gray.rows;
+  const normalizedStrength = clamp(Number(strength) || 3, 1, 5);
+  // Level 1 removes only clearly dark handwriting. At level 5, even a faint
+  // pencil trace or pale coloured mark inside a recognised answer box counts.
+  const handwritingGrayLimit = 222 + normalizedStrength * 5;
+  const handwritingSaturationLimit = Math.max(2, 25 - normalizedStrength * 5);
   const dark = new cv.Mat();
   const vertical = new cv.Mat();
   const horizontal = new cv.Mat();
@@ -551,7 +556,11 @@ function createAnswerBoxMask(cv, gray, saturation, source) {
           const blue = source[offset + 2];
           const blueDominance = blue - (red + green) / 2;
           const isBlueInk = saturation[pixel] >= 20 && blueDominance > 12;
-          if (!isBlueInk && (grayData[pixel] < 242 || saturation[pixel] > 10)) {
+          if (
+            !isBlueInk &&
+            (grayData[pixel] < handwritingGrayLimit ||
+              saturation[pixel] > handwritingSaturationLimit)
+          ) {
             result[pixel] = 255;
           }
         }
@@ -976,11 +985,11 @@ export function processWithOpenCv(cv, core, image, userOptions = {}) {
       if (grayData[pixel] < 78 && sat < 32) darkCoreRaw[pixel] = 255;
 
       if (options.removeColor) {
-        if (isRedInkPixel(red, green, blue)) {
+        if (isRedInkPixel(red, green, blue, Math.max(18, 48 - strength * 6))) {
           colorRaw[pixel] = 255;
           confidentColorPixels += 1;
         }
-        if (isRedInkPixel(red, green, blue, COLOR_INK_GROWTH_SATURATION)) {
+        if (isRedInkPixel(red, green, blue, Math.max(5, 24 - strength * 3))) {
           faintColorRaw[pixel] = 255;
         }
       }
@@ -1010,15 +1019,24 @@ export function processWithOpenCv(cv, core, image, userOptions = {}) {
       // Cover the last JPEG/anti-aliased fringe around a confirmed red stroke.
       // Printed dark cores inside this two-pixel expansion are
       // retained by preserveRepairedMask after inpainting.
-      colorMask = dilateMask(cv, colorMask, width, height, 5);
+      // Stronger settings deliberately include a wider anti-aliased fringe.
+      // This makes the difference visible even for a dense, dark red pen
+      // stroke whose core is detected at every level.
+      colorMask = dilateMask(
+        cv,
+        colorMask,
+        width,
+        height,
+        strength + 2,
+      );
     }
 
     if (options.removePencil) {
       for (let pixel = 0; pixel < pixelCount; pixel += 1) {
         const grayValue = grayData[pixel];
         if (
-          backgroundData[pixel] - grayValue > 27 - strength * 2 &&
-          grayValue > 102 - strength * 5 &&
+          backgroundData[pixel] - grayValue > 38 - strength * 5 &&
+          grayValue > 132 - strength * 12 &&
           grayValue < 224 &&
           saturation[pixel] < 32 &&
           !printGuard[pixel] &&
@@ -1035,9 +1053,19 @@ export function processWithOpenCv(cv, core, image, userOptions = {}) {
     let pencilMask = new Uint8Array(pixelCount);
     let structures = [];
     if (options.removePencil || options.removeColor) {
-      const boxAnalysis = createAnswerBoxMask(cv, gray, saturation, data);
+      const boxAnalysis = createAnswerBoxMask(cv, gray, saturation, data, strength);
       structures = boxAnalysis.structures;
-      const expandedBoxes = dilateMask(cv, boxAnalysis.mask, width, height);
+      // A level changes not just the threshold, but also how far the detected
+      // writing is cleaned around its edge: 3px at level 1 through 7px at
+      // level 5. This is especially important for dark pencil characters,
+      // whose cores otherwise satisfy every threshold equally.
+      const expandedBoxes = dilateMask(
+        cv,
+        boxAnalysis.mask,
+        width,
+        height,
+        strength + 2,
+      );
       // A photographed shadow can make the pale anti-aliased edge of printed
       // text look like pencil. Once a repeated answer-box layout is known,
       // the box interiors are the reliable handwriting region. Do not let the

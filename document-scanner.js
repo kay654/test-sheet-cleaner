@@ -122,7 +122,11 @@ function readContourPoints(contour) {
   return points;
 }
 
-function findPaperQuadrilateral(cv, rgba) {
+function findPaperQuadrilateral(cv, rgba, {
+  saturationLimit = 92,
+  minimumValue = 55,
+  closeRatio = 0.035,
+} = {}) {
   const rgb = new cv.Mat();
   const hsv = new cv.Mat();
   const mask = new cv.Mat(rgba.rows, rgba.cols, cv.CV_8UC1);
@@ -137,12 +141,12 @@ function findPaperQuadrilateral(cv, rgba) {
     const maskData = mask.data;
     for (let pixel = 0; pixel < maskData.length; pixel += 1) {
       const offset = pixel * 3;
-      maskData[pixel] = hsvData[offset + 1] <= 92 && hsvData[offset + 2] >= 55
+      maskData[pixel] = hsvData[offset + 1] <= saturationLimit && hsvData[offset + 2] >= minimumValue
         ? 255
         : 0;
     }
 
-    let closeSize = Math.max(9, Math.round(Math.min(rgba.cols, rgba.rows) * 0.035));
+    let closeSize = Math.max(9, Math.round(Math.min(rgba.cols, rgba.rows) * closeRatio));
     if (closeSize % 2 === 0) closeSize += 1;
     closeKernel = cv.getStructuringElement(
       cv.MORPH_RECT,
@@ -190,17 +194,24 @@ function findPaperQuadrilateral(cv, rgba) {
   }
 }
 
-function findCannyQuadrilateral(cv, rgba) {
+function findCannyQuadrilateral(cv, rgba, {
+  lowThreshold = 15,
+  highThreshold = 45,
+  closeRatio = 0.026,
+} = {}) {
   const gray = new cv.Mat();
   const blurred = new cv.Mat();
   const edges = new cv.Mat();
   const contours = new cv.MatVector();
   const hierarchy = new cv.Mat();
-  const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(31, 31));
+  let kernel = null;
   try {
     cv.cvtColor(rgba, gray, cv.COLOR_RGBA2GRAY);
     cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
-    cv.Canny(blurred, edges, 15, 45);
+    cv.Canny(blurred, edges, lowThreshold, highThreshold);
+    let closeSize = Math.max(11, Math.round(Math.min(rgba.cols, rgba.rows) * closeRatio));
+    if (closeSize % 2 === 0) closeSize += 1;
+    kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(closeSize, closeSize));
     cv.morphologyEx(edges, edges, cv.MORPH_CLOSE, kernel);
     cv.findContours(edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
     const imageArea = rgba.cols * rgba.rows;
@@ -566,6 +577,24 @@ function tagCandidate(candidate, method) {
   return candidate ? { ...candidate, method } : null;
 }
 
+function selectCandidateForStrategy(candidates, strategy) {
+  const preferredMethods = {
+    // The first detection uses the most reliable result from every method.
+    balanced: [],
+    // Retries deliberately choose independent evidence rather than repeating
+    // the same overall ranking.
+    edges: ["directed-edge-strict", "canny-fine", "hough", "directed-edge", "directed-edge-relaxed", "canny"],
+    contrast: ["otsu", "hsv-bright", "hsv"],
+    contours: ["canny-coarse", "canny", "hough", "directed-edge"],
+  }[strategy] || [];
+  if (!preferredMethods.length) return candidates[0] || null;
+  for (const method of preferredMethods) {
+    const candidate = candidates.find((item) => item.method === method);
+    if (candidate) return candidate;
+  }
+  return candidates[0] || null;
+}
+
 function describeCandidate(candidate, width, height) {
   if (!candidate) return null;
   return {
@@ -578,7 +607,7 @@ function describeCandidate(candidate, width, height) {
   };
 }
 
-export function detectDocument(cv, image) {
+export function detectDocument(cv, image, { attempt = 0 } = {}) {
   validateImage(image);
   const input = createRgbaMat(cv, image);
   const resized = new cv.Mat();
@@ -600,6 +629,9 @@ export function detectDocument(cv, image) {
     // much better when a wood desk has a similar low-saturation colour to the
     // sheet. Running both on the small detection image is inexpensive and
     // avoids trusting the first large contour blindly.
+    // Start retries with the paper/desk separation that most often corrects a
+    // false edge selection, then try edge and contour evidence on later taps.
+    const strategy = ["balanced", "contrast", "edges", "contours"][Math.abs(Math.trunc(attempt)) % 4];
     const colorCandidate = tagCandidate(findPaperQuadrilateral(cv, resized), "hsv");
     const otsuCandidate = tagCandidate(findOtsuQuadrilateral(cv, resized), "otsu");
     const cannyCandidate = tagCandidate(findCannyQuadrilateral(cv, resized), "canny");
@@ -607,6 +639,26 @@ export function detectDocument(cv, image) {
     const directedCandidate = tagCandidate(findDirectedEdgeQuadrilateral(cv, resized), "directed-edge");
     let candidates = [colorCandidate, otsuCandidate, cannyCandidate, houghCandidate, directedCandidate]
       .filter(Boolean);
+
+    // Every retry also changes detector parameters. This matters when the
+    // image contains printed rules or coloured handwriting near a page edge:
+    // a different method alone can still recreate the same contour.
+    if (strategy === "edges") {
+      candidates.push(
+        tagCandidate(findDirectedEdgeQuadrilateral(cv, resized, 0.34), "directed-edge-relaxed"),
+        tagCandidate(findDirectedEdgeQuadrilateral(cv, resized, 0.50), "directed-edge-strict"),
+        tagCandidate(findCannyQuadrilateral(cv, resized, { lowThreshold: 9, highThreshold: 32, closeRatio: 0.018 }), "canny-fine"),
+      );
+    } else if (strategy === "contrast") {
+      candidates.push(
+        tagCandidate(findPaperQuadrilateral(cv, resized, { saturationLimit: 118, minimumValue: 80, closeRatio: 0.022 }), "hsv-bright"),
+      );
+    } else if (strategy === "contours") {
+      candidates.push(
+        tagCandidate(findCannyQuadrilateral(cv, resized, { lowThreshold: 30, highThreshold: 90, closeRatio: 0.042 }), "canny-coarse"),
+      );
+    }
+    candidates = candidates.filter(Boolean);
     scoreCandidates(resized, candidates);
 
     // Re-run only when the evidence is weak or ambiguous. Different outward
@@ -623,7 +675,7 @@ export function detectDocument(cv, image) {
       for (const item of [relaxedDirected, strictDirected]) if (item) candidates.push(item);
       scoreCandidates(resized, candidates);
     }
-    const candidate = candidates[0];
+    const candidate = selectCandidateForStrategy(candidates, strategy);
     if (!candidate) {
       return { corners: defaultDocumentCorners(), confidence: 0, detected: false };
     }

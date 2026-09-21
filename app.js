@@ -2,6 +2,7 @@
   "use strict";
 
   const ASSET_VERSION = 2;
+  const ANALYTICS_APP_NAME = "test_cleaner";
   const PROCESSOR_PROTOCOL_VERSION = 1;
   const PROCESSOR_TIMEOUT_MS = 90_000;
   const DOCUMENT_DETECTION_MAX_DIMENSION = 1200;
@@ -57,6 +58,18 @@
     sessionRevision: 0, processingRevision: 0, documentDetectionAttempt: 0,
     workerCancellations: new Set(),
   };
+
+  // Keep analytics payloads deliberately small: no image data, file names, or
+  // other user-provided content leaves the browser through this helper.
+  function trackEvent(name, parameters = {}) {
+    if (typeof window.gtag !== "function") return;
+    window.gtag("event", name, { app_name: ANALYTICS_APP_NAME, ...parameters });
+  }
+
+  function cleaningMode() {
+    if (state.removeColor && state.removePencil) return "auto";
+    return state.removeColor ? "color" : "pencil";
+  }
 
   function beginSession() {
     runtime.sessionRevision += 1;
@@ -489,6 +502,8 @@
 
   function printResult() {
     const source = elements.resultCanvas;
+    if (!source.width || !source.height) return;
+    trackEvent("print");
     if (!isIOSDevice() && source.width && source.height && printCanvasInIsolatedWindow(source)) return;
     synchronizePrintCanvas();
     printFromDocument();
@@ -499,6 +514,8 @@
     const resultCanvas = elements.resultCanvas;
     if (!sourceCanvas.width || !isCurrentSession(sessionRevision)) return;
     const processingRevision = ++runtime.processingRevision;
+    const processingMode = cleaningMode();
+    const referenceUsed = runtime.referenceReady ? "yes" : "no";
     const isCurrent = () =>
       isCurrentSession(sessionRevision) && processingRevision === runtime.processingRevision;
     setState({ error: "", editing: false, editCursor: null, phase: "analyzing" });
@@ -541,6 +558,7 @@
       runtime.currentStroke = null;
       synchronizePrintCanvas();
       setState({ phase: "complete", editAvailability: { undo: false, redo: false } });
+      trackEvent("process_complete", { processing_mode: processingMode, reference_used: referenceUsed });
     } catch (error) {
       if (!isCurrent()) return;
       console.error("画像処理に失敗しました。", error);
@@ -651,7 +669,7 @@
       (allowInternalSvg && extension === "svg" && file.type === "image/svg+xml");
   }
 
-  async function loadFile(file, allowInternalSvg = false, requestedSession = null) {
+  async function loadFile(file, allowInternalSvg = false, requestedSession = null, sourceType = "local") {
     const sessionRevision = requestedSession ?? beginSession();
     if (!isCurrentSession(sessionRevision)) return;
     if (!supportedFile(file, allowInternalSvg)) {
@@ -676,6 +694,7 @@
     try {
       bitmap = await decodeImage(file);
       if (!isCurrentSession(sessionRevision)) return;
+      trackEvent("select_content", { content_type: "source_image", item_id: sourceType });
       const originalWidth = bitmap.width;
       const originalHeight = bitmap.height;
       const scale = Math.min(1, Math.sqrt(MAX_PIXELS / (bitmap.width * bitmap.height)));
@@ -768,6 +787,7 @@
         new File([blob], "漢字ミニテスト.png", { type: "image/png" }),
         true,
         sessionRevision,
+        "sample",
       );
     } catch (error) {
       if (!isCurrentSession(sessionRevision)) return;
@@ -805,6 +825,7 @@
       link.href = url;
       link.download = `${stem}-clean.png`;
       link.click();
+      trackEvent("save");
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     }, "image/png");
   }

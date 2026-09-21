@@ -84,15 +84,15 @@ try {
 }
 
 const modulesReady = Promise.all([
-  import("./processing-core.js?v=1").then((module) => {
+  import("./processing-core.js?v=2").then((module) => {
     reportStartup("core-loaded");
     return module;
   }),
-  import("./opencv-processing.js?v=1").then((module) => {
+  import("./opencv-processing.js?v=2").then((module) => {
     reportStartup("pipeline-loaded");
     return module;
   }),
-  import("./document-scanner.js?v=1").then((module) => {
+  import("./document-scanner.js?v=2").then((module) => {
     reportStartup("scanner-loaded");
     return module;
   }),

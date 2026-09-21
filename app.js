@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const ASSET_VERSION = 1;
+  const ASSET_VERSION = 2;
   const PROCESSOR_PROTOCOL_VERSION = 1;
   const PROCESSOR_TIMEOUT_MS = 90_000;
   const DOCUMENT_DETECTION_MAX_DIMENSION = 1200;

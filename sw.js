@@ -1,23 +1,23 @@
 "use strict";
 
-const CACHE_NAME = "test-cleaner-v1";
+const CACHE_NAME = "test-cleaner-v2";
 const APP_SHELL = [
   "./",
   "./index.html",
   "./third-party-notices.html",
-  "./styles.css?v=1",
-  "./app.js?v=1",
-  "./manifest.webmanifest?v=1",
+  "./styles.css?v=2",
+  "./app.js?v=2",
+  "./manifest.webmanifest?v=2",
   "./icon.png",
   "./og.png",
-  "./sample-worksheet.png?v=1",
-  "./processor.worker.js?v=1",
-  "./processing-core.js?v=1",
-  "./opencv-processing.js?v=1",
-  "./document-scanner.js?v=1",
+  "./sample-worksheet.png?v=2",
+  "./processor.worker.js?v=2",
+  "./processing-core.js?v=2",
+  "./opencv-processing.js?v=2",
+  "./document-scanner.js?v=2",
   "./vendor/opencv/opencv.js",
   "./vendor/opencv/opencv.wasm",
-  "./vendor/heic2any/heic2any.min.js?v=1",
+  "./vendor/heic2any/heic2any.min.js?v=2",
   "./third_party_licenses/Apache-2.0.txt",
   "./third_party_licenses/GPL-3.0.txt",
   "./third_party_licenses/LGPL-3.0.txt",

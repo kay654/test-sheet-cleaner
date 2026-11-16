@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const ASSET_VERSION = 2;
+  const ASSET_VERSION = 3;
   const ANALYTICS_APP_NAME = "test_cleaner";
   const PROCESSOR_PROTOCOL_VERSION = 1;
   const PROCESSOR_TIMEOUT_MS = 90_000;
@@ -61,9 +61,46 @@
 
   // Keep analytics payloads deliberately small: no image data, file names, or
   // other user-provided content leaves the browser through this helper.
+  const processingParameters = {
+    processing_mode: (value) => ["auto", "color", "pencil"].includes(value),
+    reference_used: (value) => value === "yes" || value === "no"
+  };
+  const analyticsEvents = {
+    app_use: { usage_action: (value) => value === "process" },
+    select_content: {
+      content_type: (value) => value === "source_image",
+      item_id: (value) => value === "local" || value === "sample"
+    },
+    process_start: processingParameters,
+    process_complete: processingParameters,
+    save: {},
+    print: {}
+  };
+  let analyticsUsed = false;
+
   function trackEvent(name, parameters = {}) {
-    if (typeof window.gtag !== "function") return;
-    window.gtag("event", name, { app_name: ANALYTICS_APP_NAME, ...parameters });
+    try {
+      if (!Object.prototype.hasOwnProperty.call(analyticsEvents, name)) return;
+      if (typeof window.gtag !== "function") return;
+      const allowed = {};
+      for (const [key, valid] of Object.entries(analyticsEvents[name])) {
+        if (valid(parameters[key])) allowed[key] = parameters[key];
+      }
+      window.gtag("event", name, {
+        ...allowed,
+        app_name: ANALYTICS_APP_NAME,
+        app_key: ANALYTICS_APP_NAME,
+        content_group: ANALYTICS_APP_NAME
+      });
+    } catch {
+      // Analytics must not interrupt processing or output.
+    }
+  }
+
+  function markUsed() {
+    if (analyticsUsed) return;
+    analyticsUsed = true;
+    trackEvent("app_use", { usage_action: "process" });
   }
 
   function cleaningMode() {
@@ -456,6 +493,7 @@
     const heightMm = widthMm / aspectRatio;
     target.style.setProperty("--print-width", `${widthMm.toFixed(2)}mm`);
     target.style.setProperty("--print-height", `${heightMm.toFixed(2)}mm`);
+    return true;
   }
 
   function cleanupPrintMode() {
@@ -464,15 +502,18 @@
     window.removeEventListener("focus", cleanupPrintMode);
   }
 
-  function printFromDocument() {
+  function printFromDocument(beforePrint) {
     document.body.classList.add("is-printing");
     window.addEventListener("afterprint", cleanupPrintMode, { once: true });
     window.addEventListener("focus", cleanupPrintMode, { once: true });
     setTimeout(cleanupPrintMode, 10000);
-    requestAnimationFrame(() => requestAnimationFrame(() => window.print()));
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (typeof window.print === "function") beforePrint();
+      window.print();
+    }));
   }
 
-  function printCanvasInIsolatedWindow(source) {
+  function printCanvasInIsolatedWindow(source, beforePrint) {
     let printWindow = null;
     try {
       printWindow = window.open("", "test-cleaner-print");
@@ -492,6 +533,7 @@
       printDocument.body.append(printCanvas);
       printWindow.addEventListener("afterprint", () => setTimeout(() => printWindow?.close(), 250), { once: true });
       printWindow.focus();
+      if (typeof printWindow.print === "function") beforePrint();
       printWindow.print();
       return true;
     } catch {
@@ -503,10 +545,15 @@
   function printResult() {
     const source = elements.resultCanvas;
     if (!source.width || !source.height) return;
-    trackEvent("print");
-    if (!isIOSDevice() && source.width && source.height && printCanvasInIsolatedWindow(source)) return;
-    synchronizePrintCanvas();
-    printFromDocument();
+    let printRequested = false;
+    const beforePrint = () => {
+      if (printRequested) return;
+      printRequested = true;
+      trackEvent("print");
+    };
+    if (!isIOSDevice() && printCanvasInIsolatedWindow(source, beforePrint)) return;
+    const prepared = synchronizePrintCanvas();
+    printFromDocument(() => { if (prepared) beforePrint(); });
   }
 
   async function runProcessing(sessionRevision = runtime.sessionRevision) {
@@ -514,8 +561,6 @@
     const resultCanvas = elements.resultCanvas;
     if (!sourceCanvas.width || !isCurrentSession(sessionRevision)) return;
     const processingRevision = ++runtime.processingRevision;
-    const processingMode = cleaningMode();
-    const referenceUsed = runtime.referenceReady ? "yes" : "no";
     const isCurrent = () =>
       isCurrentSession(sessionRevision) && processingRevision === runtime.processingRevision;
     setState({ error: "", editing: false, editCursor: null, phase: "analyzing" });
@@ -534,7 +579,11 @@
       setState({ phase: "detecting" });
       const transfers = [imageData.data.buffer];
       if (referenceImageData) transfers.push(referenceImageData.data.buffer);
-      const result = await requestWorker({
+      const eventParameters = {
+        processing_mode: cleaningMode(),
+        reference_used: referenceImageData ? "yes" : "no"
+      };
+      const payload = {
         action: "clean",
         image: { data: imageData.data, width: imageData.width, height: imageData.height },
         options: {
@@ -544,7 +593,10 @@
           suppressPaper: true,
           reference: referenceImageData ? { data: referenceImageData.data, width: referenceImageData.width, height: referenceImageData.height } : null,
         },
-      }, transfers);
+      };
+      markUsed();
+      trackEvent("process_start", eventParameters);
+      const result = await requestWorker(payload, transfers);
       if (!isCurrent()) return;
       setState({ phase: "restoring" });
       resultCanvas.width = result.width;
@@ -558,7 +610,7 @@
       runtime.currentStroke = null;
       synchronizePrintCanvas();
       setState({ phase: "complete", editAvailability: { undo: false, redo: false } });
-      trackEvent("process_complete", { processing_mode: processingMode, reference_used: referenceUsed });
+      trackEvent("process_complete", eventParameters);
     } catch (error) {
       if (!isCurrent()) return;
       console.error("画像処理に失敗しました。", error);

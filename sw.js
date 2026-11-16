@@ -1,23 +1,24 @@
 "use strict";
 
-const CACHE_NAME = "test-cleaner-v2";
+const CACHE_PREFIX = "test-cleaner-";
+const CACHE_NAME = "test-cleaner-v3";
 const APP_SHELL = [
   "./",
   "./index.html",
   "./third-party-notices.html",
-  "./styles.css?v=2",
-  "./app.js?v=2",
-  "./manifest.webmanifest?v=2",
+  "./styles.css?v=3",
+  "./app.js?v=3",
+  "./manifest.webmanifest?v=3",
   "./icon.png",
   "./og.png",
-  "./sample-worksheet.png?v=2",
-  "./processor.worker.js?v=2",
-  "./processing-core.js?v=2",
-  "./opencv-processing.js?v=2",
-  "./document-scanner.js?v=2",
+  "./sample-worksheet.png?v=3",
+  "./processor.worker.js?v=3",
+  "./processing-core.js?v=3",
+  "./opencv-processing.js?v=3",
+  "./document-scanner.js?v=3",
   "./vendor/opencv/opencv.js",
   "./vendor/opencv/opencv.wasm",
-  "./vendor/heic2any/heic2any.min.js?v=2",
+  "./vendor/heic2any/heic2any.min.js?v=3",
   "./third_party_licenses/Apache-2.0.txt",
   "./third_party_licenses/GPL-3.0.txt",
   "./third_party_licenses/LGPL-3.0.txt",
@@ -31,7 +32,10 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys()
-      .then((names) => Promise.all(names.filter((name) => name !== CACHE_NAME).map((name) => caches.delete(name))))
+      .then((names) => Promise.all(
+        names.filter((name) => name.startsWith(CACHE_PREFIX) && name !== CACHE_NAME)
+          .map((name) => caches.delete(name))
+      ))
       .then(() => self.clients.claim())
   );
 });
